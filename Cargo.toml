@@ -1,0 +1,29 @@
+[package]
+name = "stp-sys"
+version = "0.0.0"
+
+edition = "2024"
+publish = false
+
+build = "build.rs"
+links = "stp"
+
+categories = ["api-bindings", "science"]
+description = "Rust bindings for the STP theorem prover (a solver for the quantifier-free theories of bit-vectors and arrays)."
+keywords = ["bindings", "bitvector", "smt", "solver", "stp"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/danielschemmel/stp-sys"
+
+[features]
+default = ["vendor"]
+# Build STP from source and link it statically. When this feature is disabled
+# the crate instead links against an STP installation found on the system (see
+# `build.rs` and the crate documentation for the environment variables that
+# select it).
+vendor = []
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1"
