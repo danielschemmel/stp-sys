@@ -26,4 +26,5 @@ vendor = []
 [dependencies]
 
 [build-dependencies]
+bindgen = "0.73"
 cmake = "0.1"

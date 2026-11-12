@@ -9,6 +9,10 @@
 //! instructions Cargo needs. Without `vendor`, it instead links against an STP
 //! 3.x installation that is already present on the system.
 //!
+//! In both configurations, `bindgen` translates STP's C API header
+//! (`stp/stp.h` and the generated headers it includes) into the Rust bindings
+//! exposed by the crate's `ffi` module.
+//!
 //! Environment variables understood by the vendored path:
 //!
 //! * `STP_SYS_SOURCE_DIR` -- use this STP checkout instead of downloading one.
@@ -24,6 +28,8 @@
 //! * `STP_SYS_PREFIX`     -- installation prefix holding `lib/` (and,
 //!   optionally, `include/`).
 //! * `STP_SYS_LIB_DIR`    -- directory holding the STP libraries.
+//! * `STP_SYS_INCLUDE_DIR` -- directory holding `stp/stp.h` (defaults to
+//!   `<prefix>/include`, the parent of `STP_SYS_LIB_DIR`, or `/usr/include`).
 //! * `STP_SYS_STATIC`     -- link `libstp`-style static archives from
 //!   `STP_SYS_LIB_DIR` instead of shared libraries.
 
@@ -66,6 +72,7 @@ fn main() {
 		"STP_SYS_DEPS_DIR",
 		"STP_SYS_PREFIX",
 		"STP_SYS_LIB_DIR",
+		"STP_SYS_INCLUDE_DIR",
 		"STP_SYS_STATIC",
 	] {
 		println!("cargo:rerun-if-env-changed={var}");
@@ -165,6 +172,8 @@ fn build_vendored() {
 	// `cmake::Config::build` runs the configure and build steps; the returned
 	// path is the CMake prefix. The build tree lives at `<prefix>/build`.
 	config.build();
+
+	generate_bindings(&[source_dir.join("include"), build_tree.join("generated").join("include")]);
 
 	let stp_archive = build_tree.join("lib").join("libstp.a");
 	assert!(
@@ -740,11 +749,87 @@ fn link_system() {
 		println!("cargo:rustc-link-search=native={}", dir.display());
 	}
 
+	generate_system_bindings(prefix.as_deref(), lib_dir.as_deref());
+
 	let kind = if static_link { "static" } else { "dylib" };
 	println!("cargo:rustc-link-lib={kind}=stp");
 	for lib in ["stdc++", "gmp", "pthread", "rt", "atomic", "dl", "m", "z"] {
 		println!("cargo:rustc-link-lib=dylib={lib}");
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Bindings
+// ---------------------------------------------------------------------------
+
+/// Generates the Rust bindings for STP's C API into `OUT_DIR/bindings.rs`.
+fn generate_bindings(include_dirs: &[PathBuf]) {
+	let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+	let header = include_dirs
+		.iter()
+		.map(|dir| dir.join("stp").join("stp.h"))
+		.find(|header| header.is_file())
+		// Fall back to the compiler's own include search path (for example a
+		// system STP in a directory we did not guess).
+		.unwrap_or_else(|| PathBuf::from("stp").join("stp.h"));
+
+	let mut builder = bindgen::Builder::default()
+		.header(header.to_string_lossy())
+		// STP's public header is C99; the generated headers it includes are
+		// plain C as well.
+		.clang_args(["-x", "c", "-std=c11"])
+		// Do not decorate the declarations with dllimport on Windows: the
+		// vendored build is static and the system build may be either.
+		.clang_arg("-DSTP_STATIC")
+		// Only STP's own names are part of the binding; everything else in the
+		// translation unit (the C standard headers) is mapped to Rust's own
+		// types by bindgen.
+		.allowlist_function("stp_.*")
+		.allowlist_type("stp_.*")
+		.allowlist_var("STP_.*")
+		// Expose enumerators under their C names (`STP_OK`, `STP_KIND_BV_ADD`,
+		// ...) rather than bindgen's default `stp_status_STP_OK` spelling.
+		.default_enum_style(bindgen::EnumVariation::Consts)
+		.prepend_enum_name(false)
+		// `stp.h` is C, but keep the layout assertions for the public
+		// by-value structs so an ABI change fails at build time.
+		.layout_tests(true)
+		.parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
+
+	for dir in include_dirs {
+		builder = builder.clang_arg(format!("-I{}", dir.display()));
+	}
+
+	let bindings = builder.generate().expect("failed to generate the STP bindings");
+	bindings
+		.write_to_file(out_dir.join("bindings.rs"))
+		.expect("failed to write the STP bindings");
+}
+
+/// Generates the bindings for an STP installation found on the system.
+fn generate_system_bindings(prefix: Option<&Path>, lib_dir: Option<&Path>) {
+	let mut include_dirs = Vec::new();
+	if let Some(dir) = env::var_os("STP_SYS_INCLUDE_DIR") {
+		include_dirs.push(PathBuf::from(dir));
+	}
+	if let Some(prefix) = prefix {
+		include_dirs.push(prefix.join("include"));
+	}
+	if let Some(lib_dir) = lib_dir {
+		if let Some(parent) = lib_dir.parent() {
+			include_dirs.push(parent.join("include"));
+		}
+	}
+	// Let the compiler's own search path handle the usual locations.
+	for dir in ["/usr/local/include", "/usr/include"] {
+		let dir = PathBuf::from(dir);
+		if dir.join("stp").join("stp.h").is_file() {
+			include_dirs.push(dir);
+			break;
+		}
+	}
+	dedupe(&mut include_dirs);
+	generate_bindings(&include_dirs);
 }
 
 // ---------------------------------------------------------------------------
